@@ -19,6 +19,7 @@ import Animated, {
   Extrapolate,
 } from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
+import { Picker } from "@react-native-picker/picker";
 
 export default function App() {
   const [photos, setPhotos] = useState([]);
@@ -27,6 +28,7 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [permission, setPermission] = useState(null);
   const [swipeAction, setSwipeAction] = useState(null);
+  const [filter, setFilter] = useState("recent");
 
   const translateX = useSharedValue(0);
   const rotateZ = useSharedValue(0);
@@ -38,19 +40,36 @@ export default function App() {
       setPermission(status === "granted");
       if (status === "granted") {
         const photoAssets = await MediaLibrary.getAssetsAsync({
-          first: 100,
-          mediaType: ["photo"],
+          first: 1000, // Aumentado para 1000
+          mediaType: ["photo", "video"], // Inclui fotos e vídeos
         });
-        const photosWithLocalUris = await Promise.all(
+        const assetsWithDetails = await Promise.all(
           photoAssets.assets.map(async (asset) => {
             const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
-            return { ...asset, localUri: assetInfo.localUri || asset.uri };
+            return {
+              ...asset,
+              localUri: assetInfo.localUri || asset.uri,
+              fileSize: assetInfo.fileSize || 0,
+              modificationTime: asset.modificationTime || 0,
+            };
           })
         );
-        setPhotos(photosWithLocalUris);
+
+        const sortedAssets = [...assetsWithDetails].sort((a, b) => {
+          if (filter === "recent") {
+            return b.modificationTime - a.modificationTime;
+          } else if (filter === "oldest") {
+            return a.modificationTime - b.modificationTime;
+          } else if (filter === "size") {
+            return b.fileSize - a.fileSize;
+          }
+          return 0;
+        });
+
+        setPhotos(sortedAssets);
       }
     })();
-  }, []);
+  }, [filter]);
 
   const onGestureEvent = (event) => {
     translateX.value = event.nativeEvent.translationX;
@@ -65,7 +84,7 @@ export default function App() {
     const { translationX } = event.nativeEvent;
 
     if (translationX > 50) {
-      setSwipeAction("Foto mantida");
+      setSwipeAction("Item mantido");
       setHistory([...history, { action: "keep", index: currentIndex }]);
       setCurrentIndex(currentIndex + 1);
       translateX.value = withSpring(0);
@@ -73,7 +92,7 @@ export default function App() {
       overlayOpacity.value = withSpring(0);
       setTimeout(() => setSwipeAction(null), 1000);
     } else if (translationX < -50) {
-      setSwipeAction("Foto marcada para exclusão");
+      setSwipeAction("Item marcado para exclusão");
       setPhotosToDelete([...photosToDelete, photos[currentIndex]]);
       setHistory([...history, { action: "delete", index: currentIndex }]);
       setCurrentIndex(currentIndex + 1);
@@ -104,15 +123,15 @@ export default function App() {
 
   const handleFinish = async () => {
     if (photosToDelete.length > 0) {
-      setSwipeAction("Excluindo fotos...");
+      setSwipeAction("Excluindo itens...");
       const deleted = await MediaLibrary.deleteAssetsAsync(photosToDelete);
       if (deleted) {
         setPhotos(photos.filter((photo) => !photosToDelete.includes(photo)));
         setPhotosToDelete([]);
-        setSwipeAction("Fotos excluídas com sucesso!");
+        setSwipeAction("Itens excluídos com sucesso!");
         setHistory([]);
       } else {
-        setSwipeAction("Erro ao excluir fotos");
+        setSwipeAction("Erro ao excluir itens");
       }
       setTimeout(() => setSwipeAction(null), 2000);
     }
@@ -125,15 +144,13 @@ export default function App() {
     ],
   }));
 
-  const overlayStyle = useAnimatedStyle(() => {
-    const isLeft = translateX.value < 0;
-    return {
-      opacity: overlayOpacity.value,
-      backgroundColor: isLeft
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: overlayOpacity.value,
+    backgroundColor:
+      translateX.value < 0
         ? "rgba(231, 76, 60, 0.5)"
         : "rgba(46, 204, 113, 0.5)",
-    };
-  });
+  }));
 
   if (!permission) {
     return (
@@ -146,11 +163,11 @@ export default function App() {
   if (photos.length === 0 || currentIndex >= photos.length) {
     return (
       <View style={styles.container}>
-        <Text style={styles.endText}>Sem mais fotos para revisar!</Text>
+        <Text style={styles.endText}>Sem mais itens para revisar!</Text>
         {photosToDelete.length > 0 && (
           <TouchableOpacity style={styles.finishButton} onPress={handleFinish}>
             <Text style={styles.buttonText}>
-              Excluir {photosToDelete.length} foto(s)
+              Excluir {photosToDelete.length} item(s)
             </Text>
           </TouchableOpacity>
         )}
@@ -158,22 +175,30 @@ export default function App() {
     );
   }
 
-  const currentPhotoUri =
+  const currentAssetUri =
     photos[currentIndex].localUri || photos[currentIndex].uri;
-  const isSwipingLeft = translateX.value < 0;
 
   return (
     <GestureHandlerRootView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerText}>
-          Revisar Fotos ({currentIndex + 1}/{photos.length})
+          Revisar Itens ({currentIndex + 1}/{photos.length})
         </Text>
+        <Picker
+          selectedValue={filter}
+          style={styles.picker}
+          onValueChange={(itemValue) => setFilter(itemValue)}
+        >
+          <Picker.Item label="Mais recentes" value="recent" />
+          <Picker.Item label="Mais antigos" value="oldest" />
+          <Picker.Item label="Mais pesados" value="size" />
+        </Picker>
       </View>
 
       <PanGestureHandler onGestureEvent={onGestureEvent} onEnded={onSwipe}>
         <Animated.View style={[styles.imageContainer, animatedStyle]}>
           <ImageBackground
-            source={{ uri: currentPhotoUri }}
+            source={{ uri: currentAssetUri }}
             style={styles.image}
             resizeMode="cover"
           >
@@ -242,11 +267,17 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
+    alignItems: "center",
   },
   headerText: {
     color: "#333",
     fontSize: 18,
     fontWeight: "700",
+  },
+  picker: {
+    height: 50,
+    width: 150,
+    color: "#333",
   },
   imageContainer: {
     width: 350,
