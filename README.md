@@ -47,9 +47,5 @@ Este projeto foi criado para demonstrar habilidades com **React Native**, **anim
 
 ## 📩 Contato
 Caso tenha interesse em saber mais sobre este projeto ou colaborar, entre em contato:
-📧 Email: seuemail@example.com  
-💼 LinkedIn: [Seu Perfil](https://linkedin.com/in/seu-perfil)  
-
----
-Feito com ❤️ por [Seu Nome]
+📧 Email: dev.gabrielteles@gmail.com
 
