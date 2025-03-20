@@ -1,10 +1,13 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
   StyleSheet,
   View,
   ImageBackground,
   Text,
   TouchableOpacity,
+  ActivityIndicator,
+  Alert,
+  Image,
 } from "react-native";
 import * as MediaLibrary from "expo-media-library";
 import {
@@ -15,10 +18,10 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
-  interpolate,
-  Extrapolate,
+  runOnJS,
 } from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
+import * as FileSystem from "expo-file-system";
 
 export default function App() {
   const [photos, setPhotos] = useState([]);
@@ -27,96 +30,281 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [permission, setPermission] = useState(null);
   const [swipeAction, setSwipeAction] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasMorePhotos, setHasMorePhotos] = useState(true);
+  const [endCursor, setEndCursor] = useState(null);
+  const [totalPhotos, setTotalPhotos] = useState(0);
+
+  const PHOTOS_PER_PAGE = 50;
 
   const translateX = useSharedValue(0);
   const rotateZ = useSharedValue(0);
   const overlayOpacity = useSharedValue(0);
 
-  useEffect(() => {
-    (async () => {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      setPermission(status === "granted");
-      if (status === "granted") {
-        const photoAssets = await MediaLibrary.getAssetsAsync({
-          first: 100,
+  const loadPhotos = useCallback(
+    async (isFirstLoad = true) => {
+      try {
+        setIsLoading(true);
+        console.log("Iniciando loadPhotos, isFirstLoad:", isFirstLoad);
+
+        const { status } = await MediaLibrary.getPermissionsAsync();
+        console.log("Status atual da permissão:", status);
+
+        if (status !== "granted") {
+          console.log("Permissão não concedida, solicitando...");
+          const { status: newStatus } =
+            await MediaLibrary.requestPermissionsAsync();
+          console.log("Novo status após solicitação:", newStatus);
+
+          setPermission(newStatus === "granted");
+          console.log("Permission atualizado para:", newStatus === "granted");
+
+          if (newStatus !== "granted") {
+            console.log("Permissão negada pelo usuário");
+            setIsLoading(false);
+            Alert.alert(
+              "Permissão Negada",
+              "Você precisa conceder permissão para acessar suas fotos."
+            );
+            return;
+          }
+        }
+
+        console.log("Permissão concedida, carregando fotos...");
+        const params = {
           mediaType: ["photo"],
-        });
-        const photosWithLocalUris = await Promise.all(
+          first: PHOTOS_PER_PAGE,
+          sortBy: [MediaLibrary.SortBy.creationTime],
+        };
+
+        if (!isFirstLoad && endCursor) {
+          params.after = endCursor;
+        }
+
+        const photoAssets = await MediaLibrary.getAssetsAsync(params);
+        console.log("Fotos carregadas:", photoAssets.assets.length);
+
+        setEndCursor(photoAssets.endCursor);
+        setHasMorePhotos(photoAssets.hasNextPage);
+
+        if (photoAssets.assets.length === 0) {
+          console.log("Nenhuma foto encontrada");
+          setIsLoading(false);
+          return;
+        }
+
+        if (isFirstLoad) {
+          const { totalCount } = await MediaLibrary.getAssetsAsync({
+            mediaType: ["photo"],
+          });
+          setTotalPhotos(totalCount);
+          console.log("Total de fotos:", totalCount);
+        }
+
+        const processedPhotos = await Promise.all(
           photoAssets.assets.map(async (asset) => {
-            const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
-            return { ...asset, localUri: assetInfo.localUri || asset.uri };
+            try {
+              const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
+              let finalUri = assetInfo.localUri || asset.uri;
+
+              if (finalUri.startsWith("file://")) {
+                const fileInfo = await FileSystem.getInfoAsync(finalUri);
+                if (!fileInfo.exists) {
+                  finalUri = asset.uri;
+                }
+              }
+
+              return {
+                ...asset,
+                localUri: finalUri,
+                creationTime: asset.creationTime,
+                width: asset.width,
+                height: asset.height,
+              };
+            } catch (error) {
+              console.error("Erro ao processar foto:", error);
+              return { ...asset, localUri: asset.uri };
+            }
           })
         );
-        setPhotos(photosWithLocalUris);
+
+        if (isFirstLoad) {
+          setPhotos(processedPhotos);
+        } else {
+          setPhotos((prevPhotos) => [...prevPhotos, ...processedPhotos]);
+        }
+
+        console.log("Fotos processadas e adicionadas ao estado");
+        setIsLoading(false);
+      } catch (error) {
+        console.error("Erro ao carregar fotos:", error);
+        Alert.alert(
+          "Erro",
+          "Não foi possível carregar suas fotos. Tente novamente."
+        );
+        setIsLoading(false);
       }
-    })();
+    },
+    [endCursor]
+  );
+
+  const loadMorePhotos = useCallback(() => {
+    if (hasMorePhotos && !isLoading) {
+      loadPhotos(false);
+    }
+  }, [hasMorePhotos, isLoading, loadPhotos]);
+
+  useEffect(() => {
+    loadPhotos(true);
   }, []);
 
-  const onGestureEvent = (event) => {
+  useEffect(() => {
+    if (
+      currentIndex > 0 &&
+      photos.length > 0 &&
+      currentIndex >= photos.length * 0.7 &&
+      hasMorePhotos &&
+      !isLoading
+    ) {
+      loadMorePhotos();
+    }
+  }, [currentIndex, photos.length, hasMorePhotos, isLoading, loadMorePhotos]);
+
+  const updateSwipeAction = (message) => {
+    setSwipeAction(message);
+    setTimeout(() => setSwipeAction(null), 1000);
+  };
+
+  const onGestureEvent = useCallback((event) => {
     translateX.value = event.nativeEvent.translationX;
     rotateZ.value = event.nativeEvent.translationX / 20;
     overlayOpacity.value = Math.min(
       Math.abs(event.nativeEvent.translationX) / 50,
       0.7
     );
-  };
+  }, []);
 
-  const onSwipe = (event) => {
-    const { translationX } = event.nativeEvent;
+  const onSwipe = useCallback(
+    (event) => {
+      const { translationX } = event.nativeEvent;
 
-    if (translationX > 50) {
-      setSwipeAction("Foto mantida");
-      setHistory([...history, { action: "keep", index: currentIndex }]);
+      if (translationX > 100) {
+        runOnJS(handleKeep)();
+      } else if (translationX < -100) {
+        runOnJS(handleDelete)();
+      } else {
+        translateX.value = withSpring(0);
+        rotateZ.value = withSpring(0);
+        overlayOpacity.value = withSpring(0);
+      }
+    },
+    [currentIndex, photos, history, photosToDelete]
+  );
+
+  const handleKeep = useCallback(() => {
+    updateSwipeAction("Foto mantida");
+    setHistory((prev) => [
+      ...prev,
+      { action: "keep", index: currentIndex, photo: photos[currentIndex] },
+    ]);
+    setCurrentIndex(currentIndex + 1);
+    translateX.value = withSpring(0);
+    rotateZ.value = withSpring(0);
+    overlayOpacity.value = withSpring(0);
+  }, [currentIndex, photos, history]);
+
+  const handleDelete = useCallback(() => {
+    updateSwipeAction("Foto marcada para exclusão");
+    if (photos[currentIndex]) {
+      setPhotosToDelete((prev) => [...prev, photos[currentIndex]]);
+      setHistory((prev) => [
+        ...prev,
+        { action: "delete", index: currentIndex, photo: photos[currentIndex] },
+      ]);
       setCurrentIndex(currentIndex + 1);
-      translateX.value = withSpring(0);
-      rotateZ.value = withSpring(0);
-      overlayOpacity.value = withSpring(0);
-      setTimeout(() => setSwipeAction(null), 1000);
-    } else if (translationX < -50) {
-      setSwipeAction("Foto marcada para exclusão");
-      setPhotosToDelete([...photosToDelete, photos[currentIndex]]);
-      setHistory([...history, { action: "delete", index: currentIndex }]);
-      setCurrentIndex(currentIndex + 1);
-      translateX.value = withSpring(0);
-      rotateZ.value = withSpring(0);
-      overlayOpacity.value = withSpring(0);
-      setTimeout(() => setSwipeAction(null), 1000);
-    } else {
-      translateX.value = withSpring(0);
-      rotateZ.value = withSpring(0);
-      overlayOpacity.value = withSpring(0);
     }
-  };
+    translateX.value = withSpring(0);
+    rotateZ.value = withSpring(0);
+    overlayOpacity.value = withSpring(0);
+  }, [currentIndex, photos, history, photosToDelete]);
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (history.length === 0) return;
+
     const lastAction = history[history.length - 1];
-    setHistory(history.slice(0, -1));
-    setCurrentIndex(lastAction.index);
+    setHistory((prev) => prev.slice(0, -1));
+
+    if (currentIndex > 0) {
+      setCurrentIndex(currentIndex - 1);
+    }
+
     if (lastAction.action === "delete") {
-      setPhotosToDelete(
-        photosToDelete.filter((photo) => photo !== photos[lastAction.index])
+      setPhotosToDelete((prev) =>
+        prev.filter((photo) => photo.id !== lastAction.photo.id)
       );
     }
-    setSwipeAction("Ação desfeita!");
-    setTimeout(() => setSwipeAction(null), 1000);
-  };
 
-  const handleFinish = async () => {
-    if (photosToDelete.length > 0) {
-      setSwipeAction("Excluindo fotos...");
-      const deleted = await MediaLibrary.deleteAssetsAsync(photosToDelete);
-      if (deleted) {
-        setPhotos(photos.filter((photo) => !photosToDelete.includes(photo)));
-        setPhotosToDelete([]);
-        setSwipeAction("Fotos excluídas com sucesso!");
-        setHistory([]);
-      } else {
-        setSwipeAction("Erro ao excluir fotos");
-      }
-      setTimeout(() => setSwipeAction(null), 2000);
+    updateSwipeAction("Ação desfeita!");
+  }, [history, currentIndex]);
+
+  const handleFinish = useCallback(async () => {
+    if (photosToDelete.length === 0) {
+      Alert.alert("Nenhuma foto foi marcada para exclusão");
+      return;
     }
-  };
+
+    Alert.alert(
+      "Excluir Fotos",
+      `Você marcou ${photosToDelete.length} foto(s) para exclusão. Confirma a exclusão?`,
+      [
+        {
+          text: "Cancelar",
+          style: "cancel",
+        },
+        {
+          text: "Excluir",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setSwipeAction("Excluindo fotos...");
+              const photoIds = photosToDelete.map((photo) => photo.id);
+              const deleted = await MediaLibrary.deleteAssetsAsync(photoIds);
+
+              if (deleted) {
+                setPhotos((prev) =>
+                  prev.filter(
+                    (photo) => !photosToDelete.some((p) => p.id === photo.id)
+                  )
+                );
+                setPhotosToDelete([]);
+                setHistory([]);
+                if (currentIndex >= photos.length - photosToDelete.length) {
+                  setCurrentIndex(0);
+                }
+                updateSwipeAction("Fotos excluídas com sucesso!");
+                setTimeout(() => {
+                  setSwipeAction(null);
+                }, 2000);
+              } else {
+                setSwipeAction("Erro ao excluir fotos");
+                setTimeout(() => {
+                  setSwipeAction(null);
+                  Alert.alert(
+                    "Erro",
+                    "Não foi possível excluir algumas fotos. Verifique as permissões do aplicativo."
+                  );
+                }, 1000);
+              }
+            } catch (error) {
+              console.error("Erro ao excluir fotos:", error);
+              setSwipeAction(null);
+              Alert.alert("Erro", "Ocorreu um erro ao excluir as fotos.");
+            }
+          },
+        },
+      ]
+    );
+  }, [photosToDelete, photos, currentIndex]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [
@@ -135,15 +323,72 @@ export default function App() {
     };
   });
 
+  const PreloadNextImage = useCallback(() => {
+    if (currentIndex + 1 < photos.length && photos[currentIndex + 1]) {
+      return (
+        <Image
+          source={{
+            uri:
+              photos[currentIndex + 1].localUri || photos[currentIndex + 1].uri,
+          }}
+          style={{ width: 1, height: 1, opacity: 0 }}
+        />
+      );
+    }
+    return null;
+  }, [currentIndex, photos]);
+
   if (!permission) {
     return (
-      <Text style={styles.noPermission}>
-        Sem permissão para acessar a galeria
-      </Text>
+      <View style={styles.container}>
+        <Text style={styles.noPermission}>
+          Sem permissão para acessar a galeria
+        </Text>
+        <TouchableOpacity
+          style={styles.permissionButton}
+          onPress={async () => {
+            try {
+              const { status } = await MediaLibrary.requestPermissionsAsync();
+              console.log("Status após clique no botão:", status);
+              if (status === "granted") {
+                setPermission(true);
+                loadPhotos(true);
+              } else {
+                Alert.alert(
+                  "Permissão Negada",
+                  "Você precisa permitir o acesso às fotos para usar este aplicativo."
+                );
+              }
+            } catch (error) {
+              console.error("Erro ao solicitar permissão:", error);
+              Alert.alert("Erro", "Falha ao solicitar permissão.");
+            }
+          }}
+        >
+          <Text style={styles.buttonText}>Solicitar Permissão</Text>
+        </TouchableOpacity>
+      </View>
     );
   }
 
-  if (photos.length === 0 || currentIndex >= photos.length) {
+  if (isLoading && photos.length === 0) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#007AFF" />
+        <Text style={styles.loadingText}>Carregando suas fotos...</Text>
+      </View>
+    );
+  }
+
+  if (photos.length === 0) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.endText}>Nenhuma foto encontrada!</Text>
+      </View>
+    );
+  }
+
+  if (currentIndex >= photos.length) {
     return (
       <View style={styles.container}>
         <Text style={styles.endText}>Sem mais fotos para revisar!</Text>
@@ -154,19 +399,31 @@ export default function App() {
             </Text>
           </TouchableOpacity>
         )}
+        <TouchableOpacity
+          style={[styles.circleButton, styles.refreshButton, { marginTop: 20 }]}
+          onPress={() => {
+            setCurrentIndex(0);
+            setHistory([]);
+            setPhotosToDelete([]);
+          }}
+        >
+          <Ionicons name="refresh" size={30} color="white" />
+        </TouchableOpacity>
       </View>
     );
   }
 
-  const currentPhotoUri =
-    photos[currentIndex].localUri || photos[currentIndex].uri;
-  const isSwipingLeft = translateX.value < 0;
+  const currentPhoto = photos[currentIndex];
+  const currentPhotoUri = currentPhoto?.localUri || currentPhoto?.uri;
 
   return (
     <GestureHandlerRootView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerText}>
-          Revisar Fotos ({currentIndex + 1}/{photos.length})
+          Revisar Fotos ({currentIndex + 1}/{totalPhotos})
+        </Text>
+        <Text style={styles.subHeaderText}>
+          {photosToDelete.length} marcada(s) para exclusão
         </Text>
       </View>
 
@@ -176,49 +433,75 @@ export default function App() {
             source={{ uri: currentPhotoUri }}
             style={styles.image}
             resizeMode="cover"
+            onError={(e) =>
+              console.error("Erro ao carregar imagem:", e.nativeEvent.error)
+            }
           >
             <Animated.View style={[styles.overlay, overlayStyle]} />
             <View style={styles.actionIndicators}>
-              <Ionicons
-                name="trash-outline"
-                size={40}
-                color="#e74c3c"
-                style={styles.iconLeft}
-              />
-              <Ionicons
-                name="heart-outline"
-                size={40}
-                color="#2ecc71"
-                style={styles.iconRight}
-              />
+              <View style={[styles.actionBadge, styles.deleteBadge]}>
+                <Ionicons name="trash-outline" size={40} color="#fff" />
+                <Text style={styles.actionText}>Excluir</Text>
+              </View>
+              <View style={[styles.actionBadge, styles.keepBadge]}>
+                <Ionicons name="heart-outline" size={40} color="#fff" />
+                <Text style={styles.actionText}>Manter</Text>
+              </View>
             </View>
           </ImageBackground>
         </Animated.View>
       </PanGestureHandler>
+
+      <PreloadNextImage />
 
       {swipeAction && <Text style={styles.feedbackText}>{swipeAction}</Text>}
 
       <View style={styles.buttonContainer}>
         <TouchableOpacity
           style={[
-            styles.actionButton,
+            styles.circleButton,
+            styles.undoButton,
             !history.length && styles.disabledButton,
           ]}
           onPress={handleUndo}
           disabled={!history.length}
         >
-          <Ionicons name="arrow-undo" size={20} color="white" />
-          <Text style={styles.buttonText}>Desfazer</Text>
+          <Ionicons name="arrow-undo" size={30} color="white" />
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.actionButton, styles.finishButton]}
-          onPress={handleFinish}
+          style={[styles.circleButton, styles.deleteButton]}
+          onPress={handleDelete}
         >
-          <Ionicons name="checkmark" size={20} color="white" />
-          <Text style={styles.buttonText}>Finalizar</Text>
+          <Ionicons name="trash-outline" size={30} color="white" />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.circleButton, styles.keepButton]}
+          onPress={handleKeep}
+        >
+          <Ionicons name="heart-outline" size={30} color="white" />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.circleButton,
+            styles.finishButton,
+            photosToDelete.length === 0 && styles.disabledButton,
+          ]}
+          onPress={handleFinish}
+          disabled={photosToDelete.length === 0}
+        >
+          <Ionicons name="checkmark" size={30} color="white" />
         </TouchableOpacity>
       </View>
+
+      {isLoading && photos.length > 0 && (
+        <View style={styles.loadingMoreContainer}>
+          <ActivityIndicator size="small" color="#007AFF" />
+          <Text style={styles.loadingMoreText}>Carregando mais fotos...</Text>
+        </View>
+      )}
     </GestureHandlerRootView>
   );
 }
@@ -242,15 +525,21 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
+    alignItems: "center",
   },
   headerText: {
     color: "#333",
     fontSize: 18,
     fontWeight: "700",
   },
+  subHeaderText: {
+    color: "#e74c3c",
+    fontSize: 14,
+    marginTop: 2,
+  },
   imageContainer: {
     width: 350,
-    height: 350,
+    height: 480,
     borderRadius: 20,
     overflow: "hidden",
     elevation: 10,
@@ -277,15 +566,26 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 20,
   },
-  iconLeft: {
-    opacity: 0.8,
+  actionBadge: {
+    padding: 10,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  iconRight: {
-    opacity: 0.8,
+  deleteBadge: {
+    backgroundColor: "rgba(231, 76, 60, 0.8)",
+  },
+  keepBadge: {
+    backgroundColor: "rgba(46, 204, 113, 0.8)",
+  },
+  actionText: {
+    color: "white",
+    fontWeight: "700",
+    marginTop: 5,
   },
   feedbackText: {
     position: "absolute",
-    bottom: 120,
+    bottom: 140,
     fontSize: 18,
     color: "#fff",
     backgroundColor: "rgba(0, 0, 0, 0.9)",
@@ -303,23 +603,37 @@ const styles = StyleSheet.create({
     bottom: 40,
     flexDirection: "row",
     justifyContent: "space-between",
-    width: "85%",
-  },
-  actionButton: {
-    flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#007AFF",
-    paddingVertical: 14,
-    paddingHorizontal: 28,
+    width: "85%",
+    paddingHorizontal: 10,
+  },
+  circleButton: {
+    width: 60,
+    height: 60,
     borderRadius: 30,
-    elevation: 6,
+    justifyContent: "center",
+    alignItems: "center",
+    elevation: 8,
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    marginHorizontal: 5,
+  },
+  undoButton: {
+    backgroundColor: "#007AFF",
+  },
+  deleteButton: {
+    backgroundColor: "#e74c3c",
+  },
+  keepButton: {
+    backgroundColor: "#2ecc71",
   },
   finishButton: {
     backgroundColor: "#34C759",
+  },
+  refreshButton: {
+    backgroundColor: "#007AFF",
   },
   disabledButton: {
     backgroundColor: "#A0A0A0",
@@ -331,17 +645,40 @@ const styles = StyleSheet.create({
     marginLeft: 10,
   },
   noPermission: {
-    flex: 1,
-    textAlign: "center",
-    paddingTop: 100,
     fontSize: 18,
     color: "#333",
     fontWeight: "600",
+    marginBottom: 20,
+  },
+  permissionButton: {
+    backgroundColor: "#007AFF",
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 30,
   },
   endText: {
     fontSize: 24,
     fontWeight: "700",
     color: "#333",
     marginBottom: 30,
+  },
+  loadingText: {
+    marginTop: 20,
+    fontSize: 16,
+    color: "#666",
+  },
+  loadingMoreContainer: {
+    position: "absolute",
+    top: 120,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 20,
+  },
+  loadingMoreText: {
+    marginLeft: 10,
+    fontSize: 14,
+    color: "#666",
   },
 });
