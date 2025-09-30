@@ -21,7 +21,7 @@ import Animated, {
   runOnJS,
 } from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 
 export default function App() {
   const [photos, setPhotos] = useState([]);
