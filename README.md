@@ -20,7 +20,7 @@ PhotoSwipe é um aplicativo desenvolvido em **React Native** que permite gerenci
 ## 📲 Instalação e Uso
 1. Clone este repositório:
    ```sh
-   git clone https://github.com/seu-usuario/photo-swipe.git
+   git clone https://github.com/gabrielbypass/photoswipe.git
    ```
 2. Acesse a pasta do projeto:
    ```sh
